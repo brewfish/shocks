@@ -1,0 +1,172 @@
+---
+title: "Shock detection in global fisheries production"
+author: "Danielle Ferraro, UC Santa Barbara"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+bibliography: "brewfish.bib"
+csl: "fish-and-fisheries.csl"
+link_citations: true
+---
+
+# Introduction
+
+The purpose of this document is to describe the methods for detecting shocks to fisheries production within the annual, country-level time series that has been collated for Track 1 within the Brewfish project. This code is largely rewritten from the GitHub repository associated with the Cottrell et al. [-@cottrell_food_2019] paper: "Food production shocks across land and sea."
+
+Below is a first cut at rewriting the code. The original code was written to detect shocks across crop and livestock sectors in addition to fisheries and aquaculture sectors. [@cottrell_food_2019] used the Reg Watson marine capture database for fisheries landings in order to account for large-scale, small-scale, and IUU landings, and the FAO FishStat database for inland fisheries landings as well as inland and marine aquaculture production. The major modifications needed to use the code for our purposes will be:
+
+- Use an updated aquaculture time series from FAO Global Production
+- Use an updated fisheries time series from FAO Global Production
+- Remove time series from other sectors, i.e. crops and livestock
+
+# Setup
+
+Install packages.
+```{r packages, warning=FALSE, message=FALSE}
+
+# Rich's
+library(party)
+library(randomForest)
+library(splitstackshape)
+library(plyr) # manipulation of data formatting
+library(dplyr) # maniuplation of data formatting
+library(sp) #spatial tool
+library(spatial)
+library(classInt)
+#library(rworldmap) #if not using ggplot
+library(RColorBrewer) #Color Brew Palettes
+library(mapproj)
+library(sf)#shapefile reading
+library(ggalt)
+library(ggplot2) #plotting
+library(ggforce)
+library(rgdal) 
+library(ggmap)#creating ggmaps
+library(devtools)
+library(ggpubr) #for using the ggarrange function (displaying composite ggplots)
+library(tidyr)#switching from wide to long format
+library(zoo)# moving average functions 
+library(countrycode) #adding countrycodes to data
+library(colorspace) #adding colour palettes for plots
+library(mgcv) #gams
+library(car) # linear models
+library(ggrepel) #ggrepel labels on point chart
+# library(fANCOVA) #loess span fit function 
+# library(forecast)
+# library(earlywarnings)
+# library(Kendall)
+library(png)
+library(grid) 
+# library(readr)
+# library(plot3D)
+# library(circlize)
+library(data.table)
+library(purrr)
+
+#Mine
+library(here)
+library(tidyverse)
+```
+
+Source scripts. 
+```{r scripts}
+walk(list.files(here("src"), pattern = "\\.R$", full.names = TRUE), source) # Sets file directories
+```
+
+# Import data
+
+```{r import data}
+country_key <- read_csv(file.path(dir_raw_data, "FAO", "production", "CL_FI_COUNTRY_GROUPS.csv")) 
+production <- read_csv(file.path(dir_raw_data, "FAO", "production", "TS_FI_PRODUCTION.csv"), col_types = cols(UNIT = col_character())) %>% 
+  rename_all(tolower)
+```
+
+# Tidy data
+
+Append country names to production data. 
+
+```{r}
+production <- production %>% 
+  left_join(country_key[,c("UN_Code", "Name_En")], by = c("country" = "UN_Code")) %>% 
+  rename(country_name = Name_En)
+```
+
+Evaluate symbols. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_SYMBOL.csv")`, the different characters in the `SYMBOL` column correspond to the following notes:
+
+Code|Symbol|Name|Description
+-----|-----|-----|-----
+1|.|UNKNOWN|Data not available; unobtainable; data not separately available but included in another category
+2|0|NEGLIGIBLE|More than zero but less than half the unit used
+3|-|ZERO|None; magnitude known to be nil or zero
+4|F|ESTIMATED|FAO estimate from available sources of information or calculation based on specific assumptions
+5|R|REPETITION|Repetition
+6| |OFFICIAL|Official Data
+
+```{r}
+table(production$symbol) # Need to transform the negligibles (symbol=="0") and zeroes (symbol=="-")
+production <- production %>% 
+  mutate(quantity = case_when(symbol=="0" ~ 0.5,
+                              symbol=="-" ~ 0,
+                              TRUE ~ quantity))
+```
+
+Identify aquaculture vs. capture landings. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_PRODUCTION_SOURCE.csv")`, the different numbers in the `SOURCE` column correspond to the following types of production:
+
+Identifier|Code|Name
+-----|-----|-----
+5|AQUACULTURE|Aquaculture production
+1|FRESHWATER|Aquaculture production (freshwater)
+2|BRACKISHWATER|Aquaculture production (brackishwater)
+3|MARINE|Aquaculture production (marine)
+4|CAPTURE|Capture production
+
+```{r ID capture vs. aquaculture}
+production <- production %>% 
+  mutate(sector = if_else(source==4, "capture", "aquaculture"))
+```
+
+# Calculate aggregate production
+
+Aggregate production per year, per country, per sector.
+```{r calc aggregate production}
+agg_production <- production %>% 
+  group_by(country, country_name, year, sector) %>% 
+  summarize(sum_quantity = sum(quantity)) %>% 
+  ungroup(country, country_name, year, sector)
+```
+
+## Plot
+
+Create a pdf with aggregated aquaculture and capture production by country.
+```{r}
+agg_production_list <- agg_production %>% 
+  group_split(country_name)
+
+agg_production_plots <- map(agg_production_list, ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
+               geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
+               geom_line() +
+               geom_point() +
+               scale_color_manual(values = c("darkred", "darkblue"), labels = c("Aquaculture", "Capture")) +
+               labs(title = paste(.$country_name,"Fisheries Production"), 
+                    x = "Year", 
+                    y = "Quantity (tonnes)",
+                    color = NULL) +
+               ggpubr::theme_pubr() +
+               theme(legend.text = element_text(size=10))
+             )
+
+pdf("fig_agg_production_bycountry.pdf", paper = "a4r")
+agg_production_plots
+dev.off()
+
+# Still wanna do: plot 2 figs per page, apply consistent y-axis, apply x-axis that always starts at 0
+```
+
+# Sensitivity Analysis - Cook's Distance
+
+# References
+
+
+
