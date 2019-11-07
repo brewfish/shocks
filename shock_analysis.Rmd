@@ -144,24 +144,31 @@ Create a pdf with aggregated aquaculture and capture production by country.
 agg_production_list <- agg_production %>% 
   group_split(country_name)
 
-agg_production_plots <- map(agg_production_list, ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
-               geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
-               geom_line() +
-               geom_point() +
-               scale_color_manual(values = c("darkred", "darkblue"), labels = c("Aquaculture", "Capture")) +
-               labs(title = paste(.$country_name,"Fisheries Production"), 
-                    x = "Year", 
-                    y = "Quantity (tonnes)",
-                    color = NULL) +
-               ggpubr::theme_pubr() +
-               theme(legend.text = element_text(size=10))
-             )
-
-pdf("fig_agg_production_bycountry.pdf", paper = "a4r")
+agg_production_plots <- map(agg_production_list, 
+                            ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
+                              geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
+                              geom_line() +
+                              geom_point() +
+                              scale_color_manual(values = c("darkred", "darkblue"), 
+                                                 labels = c("Aquaculture", "Capture")) +
+                              xlim(1950,2017) +
+                              ylim(0,NA) +
+                              labs(title = paste(.$country_name,"Fisheries Production"), 
+                                   x = "Year", 
+                                   y = "Quantity (tonnes)",
+                                   color = NULL) +
+                              ggpubr::theme_pubr() +
+                              theme(legend.text = element_text(size=11))
+)
+agg_production_plots[[111]]
+pdf(here("output", "fig_agg_production_bycountry.pdf"), paper = "a4")
 agg_production_plots
 dev.off()
 
-# Still wanna do: plot 2 figs per page, apply consistent y-axis, apply x-axis that always starts at 0
+ggsave(here("output", "fig_agg_production_bycountry.pdf"), gridExtra::marrangeGrob(grobs = agg_production_plots, widths nrow=2, ncol=1))
+
+
+# Still wanna do: plot 2 figs per page
 ```
 
 # Sensitivity Analysis - Cook's Distance
