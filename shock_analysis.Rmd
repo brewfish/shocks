@@ -68,6 +68,7 @@ library(purrr)
 #Mine
 library(here)
 library(tidyverse)
+library(gridExtra) # for gridding multiple plots
 ```
 
 Source scripts. 
@@ -139,11 +140,13 @@ agg_production <- production %>%
 
 ## Plot
 
-Create a pdf with aggregated aquaculture and capture production by country.
+Create a pdf with aggregated aquaculture and capture production over time by country.
 ```{r}
+# Turn aggregated production data frame into a list of data frames by country
 agg_production_list <- agg_production %>% 
   group_split(country_name)
 
+# Build of list of production vs time plots by country
 agg_production_plots <- map(agg_production_list, 
                             ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
                               geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
@@ -151,24 +154,27 @@ agg_production_plots <- map(agg_production_list,
                               geom_point() +
                               scale_color_manual(values = c("darkred", "darkblue"), 
                                                  labels = c("Aquaculture", "Capture")) +
-                              xlim(1950,2017) +
+                              scale_x_continuous(breaks=seq(1950, 2017, 10)) +
                               ylim(0,NA) +
-                              labs(title = paste(.$country_name,"Fisheries Production"), 
+                              labs(title = paste("Fisheries Production in", .$country_name), 
                                    x = "Year", 
                                    y = "Quantity (tonnes)",
                                    color = NULL) +
                               ggpubr::theme_pubr() +
                               theme(legend.text = element_text(size=11))
 )
-agg_production_plots[[111]]
-pdf(here("output", "fig_agg_production_bycountry.pdf"), paper = "a4")
-agg_production_plots
+
+# Write plots to pdf, 3 per page
+
+# A really janky way to build an index of the 1st, 4th, 9th elements of the plot list, minus the last one.
+# Could be a better way to do this but it works.
+index <- head(seq_along(agg_production_plots)[seq(1, length(agg_production_plots), 3)], -1)
+
+pdf(here("output", "fig_agg_production_bycountry.pdf"), height = 11, width = 8.5)
+for(i in index) {
+grid.arrange(agg_production_plots[[i]], agg_production_plots[[i+1]], agg_production_plots[[i+2]])
+}
 dev.off()
-
-ggsave(here("output", "fig_agg_production_bycountry.pdf"), gridExtra::marrangeGrob(grobs = agg_production_plots, widths nrow=2, ncol=1))
-
-
-# Still wanna do: plot 2 figs per page
 ```
 
 # Sensitivity Analysis - Cook's Distance
