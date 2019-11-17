@@ -439,9 +439,9 @@ fisheries$Codes <- countrycode(fisheries$CountryName, origin = "country.name", d
 
 fisheries <- fisheries[!is.na(fisheries$Codes),]
 
-write.csv(fisheries, file="fisheries - Watson adjusted landings 1950-2014 new.csv", row.names = F)
+write.csv(fisheries, file="fisheries - Watson adjusted landings 1950-2014 new2.csv", row.names = F)
 
-fisheries <- read.csv("fisheries - Watson adjusted landings 1950-2014 new.csv", header=T, encoding = "latin1")
+fisheries <- read.csv("fisheries - Watson adjusted landings 1950-2014 new2.csv", header=T, encoding = "latin1")
 
 
 
@@ -1056,8 +1056,6 @@ marine <- marine[,c(1:8)]
 
 write.csv(marine, "Marine aquaculture production 1950 -2015.csv", row.names=F)
 
-
-ls
 ```
 ## AGGREGATE PRODUCTION DATA 
 
@@ -1108,7 +1106,7 @@ length(levels(aggmarinefisheries$Country)) #174
 length(levels(aggmarineaqua$Country)) #125
 
 
-
+## This section is where aggfisheries is created!
 #aggregate inland and marine production for both aquaculture and fisheries
 #fisheries
 aggmarinefisheries2<-aggmarinefisheries
@@ -1121,7 +1119,7 @@ names(agginlandfisheries2)[names(agginlandfisheries2)=="Value"]<-"Inland"
 agginlandfisheries2$Codes<-countrycode(agginlandfisheries2$Country, origin = "country.name", destination = "iso3c", warn=T)
 agginlandfisheries2$Codes[agginlandfisheries2$Country=="Former Yugoslav SFR"]<-"BIH"
 
-
+## Creating aggfisheries
 aggfisheries <- plyr::join(x=agginlandfisheries2, y=aggmarinefisheries2, by=c("Codes", "Year"), type="full")
 aggfisheries$Marine[is.na(aggfisheries$Marine)]<-0
 aggfisheries$Inland[is.na(aggfisheries$Inland)]<-0
@@ -1695,6 +1693,8 @@ for (d in D){
   sumofshocksacrossD <-c(sumofshocksacrossD, sum(shocks))
 }
 (sumofshocksacrossD) 
+
+Shocks.df <- cbind.data.frame(D, sumofshocksacrossD) #use this if you didnt calc shocks.df above with the otehr sectors
 
 Shocks.df <- cbind.data.frame(Shocks.df, sumofshocksacrossD)
 names(Shocks.df)[names(Shocks.df)=="sumofshocksacrossD"] <- "FisheriesNormal"
