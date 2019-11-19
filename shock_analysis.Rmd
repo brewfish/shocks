@@ -190,30 +190,34 @@ Select countries with at least 30 years of fish production.
 countries <- agg_production %>% 
   filter(sector == "capture") %>% 
   group_by(country, country_name) %>% 
-  summarise(min_yr = min(year), # n = 247 countries
+  summarise(min_yr = min(year), # n = 247 countries (incl. "other nei")
             max_yr = max(year),
             ts_len = max_yr-min_yr) %>% 
   ungroup(country, country_name) %>% 
   filter(ts_len >= 30) %>%
-  pull(country) # n = 212 countries
+  print(n = Inf) %>% 
+  pull(country) # n = 212 countries (incl. "other nei")
 
-# Select only capture fisheries data from the countries indentified above
-agg_fisheries <- subset(agg_production, sector == "capture" & country %in% countries)
+# Select only capture fisheries data from the countries indentified above, and 
+agg_fisheries <- subset(agg_production, 
+                        sector == "capture" 
+                        & country %in% countries
+                        & year >= 1980)
 ```
 
-## Total number of shocks across a range of Cook's D values
+## Count number of shocks across a range of Cook's D values
 
 ```{r n shocks across Cook's D}
-shocks <- c() #vector carrying tally of residuals over specified Cook's D
+shock_tally <- c() #vector carrying tally of residuals over specified Cook's D
 sumofshocksacrossD <- c() #sum of shocks vector per cooks distance value
 
 for(d in D) {
-  shocks <- c()
+  shock_tally <- c()
   for (i in seq_along(unique(agg_fisheries$country))) {
     dat <- agg_fisheries[agg_fisheries$country == unique(agg_fisheries$country)[i],]
     fit <- loess(sum_quantity ~ year, data = dat, span = 0.6)
     mod.err <- lm(resid(fit)[2:fit$n]~ resid(fit)[1:fit$n-1])
-    for (s in seq(1,fit$n-1, by = 1)){
+    for (s in seq(1, fit$n-1, by = 1)){
       if (s > 6 & cooks.distance(mod.err)[s] > d){
         Prodaverage <- median(dat$sum_quantity[s],  
                               dat$sum_quantity[s-1], 
@@ -223,14 +227,14 @@ for(d in D) {
                               dat$sum_quantity[s-5], 
                               dat$sum_quantity[s-6])
         Magnitude <- Prodaverage - dat$sum_quantity[s+1]
-        if (Magnitude >0){
-          shocks<-c(shocks,1)
+        if (Magnitude > 0){
+          shock_tally<-c(shock_tally,1)
         }
-        print(shocks)
+        print(shock_tally)
       }
     }
   }
-  sumofshocksacrossD <-c(sumofshocksacrossD, sum(shocks))
+  sumofshocksacrossD <-c(sumofshocksacrossD, sum(shock_tally))
 }
 
 n_shocks <- cbind.data.frame(D, sumofshocksacrossD) 
@@ -253,43 +257,48 @@ ggsave(here("output", "n_shocks_over_D.pdf"), width = 8, height = 6)
 
 ## Plot shocks
 
+Create a 3 panel plot per country depicting:  
+- Total annual capture production with a loess model fit
+- Model residuals regressed with lag-1 residuals
+- Cook's D values across the time series
+
 ```{r}
+shocks <- c()
 pdf(file = here("output", "cooks_distance_timeseries.pdf"))
 for (i in 1:length(unique(agg_fisheries$country))){
   op <- par(mfrow=c(3, 1))
   
-  #Production plot with model fit
+  # Aggregated production plot with model fit
   values <- subset(agg_fisheries$sum_quantity, agg_fisheries$country==unique(agg_fisheries$country)[i])
-  years<-subset(agg_fisheries$year, agg_fisheries$country==unique(agg_fisheries$country)[i])
-  plot(years, values, xlab="Year", ylab="Total Production (tonnes)", main=unique(agg_fisheries$country_name)[i], pch=20, cex=0.75)
-  fit <- loess(values ~ years, span=0.6)
+  years <- subset(agg_fisheries$year, agg_fisheries$country==unique(agg_fisheries$country)[i])
+  plot(years, values, xlab = "Year", ylab = "Total Production (tonnes)", main = unique(agg_fisheries$country_name)[i], pch = 20, cex = 0.75)
+  fit <- loess(values ~ years, span = 0.6)
   lines(years, predict(fit))
   
-  #regress residuals against lag-1 residuals
-  errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[2:fit$n])
-  plot(resid(fit)[2:fit$n], resid(fit)[2:fit$n], pch=20, xlab=expression("Residuals"[(italic ("t"))]), ylab=expression("Residuals"[(italic("t-1"))]))
+  # Regress residuals against lag-1 residuals
+  errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[1:fit$n-1])
+  plot(resid(fit)[2:fit$n], resid(fit)[1:fit$n-1], pch = 20, xlab = expression("Residuals"[(italic ("t"))]), ylab = expression("Residuals"[(italic("t-1"))]))
   abline(errors)
   
-  #plot cooks distance and identify outliers in residual regression
-  plot(cooks.distance(errors), type="o", pch=20, ylab="Cook's Distance", xlab="Index")
-  abline(h=0.3, lty=2, col="red", lwd=2)
+  # Plot Cook's distance and identify outliers in residual regression
+  plot(cooks.distance(errors), type = "o", pch = 20, ylab = "Cook's Distance", xlab = "Index", 
+       panel.first = abline(h = 0.3, lty = 2, col = "red", lwd = 2))
   par(op)
   
-  #Identify the Shock
-  shockInd<-which(as.vector(cooks.distance(errors)>0.3))
-  shockInd<-shockInd[shockInd>6]
-  
+  # Identify the Shock
+  shockInd <- which(as.vector(cooks.distance(errors)>0.3))
+  shockInd <- shockInd[shockInd > 6]
 
   if (length(shockInd)>0){
     for (k in 1:length(shockInd)){
-      Sector <- "Fisheries"
-      Country <- unique(agg_fisheries$country_name)[i]
-      Year <- years[shockInd+1][k]
-      fiveyearmean<-median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
-      AbsMagnitude <- fiveyearmean-values[shockInd+1][k]
-      PropMagnitude <- 1-((values[shockInd+1][k])/fiveyearmean)
-      Recovery<-which(values[(shockInd+2)[k]:53]>=(fiveyearmean*0.95))[1]
-      data <- cbind.data.frame(Sector, Country, Year, PropMagnitude, AbsMagnitude, Recovery)
+      sector <- "Fisheries"
+      country <- unique(agg_fisheries$country_name)[i]
+      year <- years[shockInd+1][k]
+      seven_yr_median <- median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
+      abs_magnitude <- seven_yr_median - values[shockInd+1][k]
+      prop_magnitude <- 1-((values[shockInd+1][k])/seven_yr_median)
+      recovery <- which(values[(shockInd+2)[k]:fit$n] >= (seven_yr_median*0.95))[1]
+      data <- cbind.data.frame(sector, country, year, prop_magnitude, abs_magnitude, recovery)
       shocks <- rbind(shocks, data)
       }
     }
@@ -297,6 +306,14 @@ for (i in 1:length(unique(agg_fisheries$country))){
 dev.off()
 summary(shocks)
 ```
+
+
+
+
+
+
+
+
 
 ```{r}
 agg_aquaculture <- subset(agg_production, sector == "aquaculture" & country %in% countries)
