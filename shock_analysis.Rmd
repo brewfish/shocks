@@ -17,7 +17,7 @@ knitr::opts_chunk$set(message = FALSE, warning = FALSE)
 
 # Introduction
 
-The purpose of this document is to describe the methods for detecting shocks to fisheries production within the annual, country-level time series that has been collated for Track 1 within the Brewfish project. This code is largely rewritten from the GitHub repository associated with the Cottrell et al. [-@cottrell_food_2019] paper: "Food production shocks across land and sea."
+The purpose of this document is to describe the methods for detecting shocks to fisheries production within the annual, country-level time series that have been collated for Track 1 within the Brewfish project. This code is largely rewritten from the GitHub repository associated with the Cottrell et al. [-@cottrell_food_2019] paper: "Food production shocks across land and sea."
 
 Below is a first cut at rewriting the code. The original code was written to detect shocks across crop and livestock sectors in addition to fisheries and aquaculture sectors. [@cottrell_food_2019] used the Reg Watson marine capture database for fisheries landings in order to account for large-scale, small-scale, and IUU landings, and the FAO FishStat database for inland fisheries landings as well as inland and marine aquaculture production. The major modifications needed to use the code for our purposes will be:
 
@@ -29,50 +29,10 @@ Below is a first cut at rewriting the code. The original code was written to det
 
 Install packages.
 ```{r packages, include = FALSE, eval = FALSE}
-
-# Rich's
-library(party)
-library(randomForest)
-library(splitstackshape)
-library(plyr) # manipulation of data formatting
-library(dplyr) # maniuplation of data formatting
-library(sp) #spatial tool
-library(spatial)
-library(classInt)
-#library(rworldmap) #if not using ggplot
-library(RColorBrewer) #Color Brew Palettes
-library(mapproj)
-library(sf)#shapefile reading
-library(ggalt)
-library(ggplot2) #plotting
-library(ggforce)
-library(rgdal) 
-library(ggmap)#creating ggmaps
-library(devtools)
-library(ggpubr) #for using the ggarrange function (displaying composite ggplots)
-library(tidyr)#switching from wide to long format
-library(zoo)# moving average functions 
-library(countrycode) #adding countrycodes to data
-library(colorspace) #adding colour palettes for plots
-library(mgcv) #gams
-library(car) # linear models
-library(ggrepel) #ggrepel labels on point chart
-# library(fANCOVA) #loess span fit function 
-# library(forecast)
-# library(earlywarnings)
-# library(Kendall)
-library(png)
-library(grid) 
-# library(readr)
-# library(plot3D)
-# library(circlize)
-library(data.table)
-library(purrr)
-
-#Mine
 library(here)
 library(tidyverse)
-library(gridExtra) # for gridding multiple plots
+library(ggpubr) # for gg*() plots; theme_pubr(); gridding multiple plots with ggarrange()
+library(broom)
 ```
 
 Source scripts. 
@@ -86,6 +46,7 @@ walk(list.files(here("src"), pattern = "\\.R$", full.names = TRUE), source) # Se
 country_key <- read_csv(file.path(dir_raw_data, "FAO", "production", "CL_FI_COUNTRY_GROUPS.csv")) 
 production <- read_csv(file.path(dir_raw_data, "FAO", "production", "TS_FI_PRODUCTION.csv"), col_types = cols(UNIT = col_character())) %>% 
   rename_all(tolower)
+master_spp_key <- read_csv(file.path(dir_data, "master_species_key.csv"))
 ```
 
 # Tidy data
@@ -139,18 +100,18 @@ Aggregate production per year, per country, per sector.
 agg_production <- production %>% 
   group_by(country, country_name, year, sector) %>% 
   summarize(sum_quantity = sum(quantity)) %>% 
-  ungroup(country, country_name, year, sector)
+  ungroup()
 ```
 
 ## Plot production
 
-Create a pdf with aggregated aquaculture and capture production over time by country.
+Create a pdf with aggregated aquaculture and capture production time series by country.
 ```{r plot agg production, eval = FALSE}
 # Turn aggregated production data frame into a list of data frames by country
 agg_production_list <- agg_production %>% 
   group_split(country_name)
 
-# Build of list of production vs time plots by country
+# Build of list of production time series plots by country
 agg_production_plots <- map(agg_production_list, 
                             ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
                               geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
@@ -169,15 +130,8 @@ agg_production_plots <- map(agg_production_list,
 )
 
 # Write plots to pdf, 3 per page
-
-# A really janky way to build an index of the 1st, 4th, 9th elements of the plot list, minus the last one.
-# Could be a better way to do this but it works.
-index <- head(seq_along(agg_production_plots)[seq(1, length(agg_production_plots), 3)], -1)
-
 pdf(here("output", "fig_agg_production_bycountry.pdf"), height = 11, width = 8.5)
-for(i in index) {
-grid.arrange(agg_production_plots[[i]], agg_production_plots[[i+1]], agg_production_plots[[i+2]])
-}
+ggpubr::ggarrange(plotlist = agg_production_plots, nrow = 3, ncol = 1, align = "v")
 dev.off()
 ```
 
@@ -185,7 +139,7 @@ dev.off()
 
 ## Identify suitable time series
 
-Select countries with at least 30 years of fish production.
+Select countries with at least 30 years of fish production data, and trim their time series to 1980 onwards.
 ```{r filter countries}
 countries <- agg_production %>% 
   filter(sector == "capture") %>% 
@@ -193,15 +147,14 @@ countries <- agg_production %>%
   summarise(min_yr = min(year), # n = 247 countries (incl. "other nei")
             max_yr = max(year),
             ts_len = max_yr-min_yr) %>% 
-  ungroup(country, country_name) %>% 
+  ungroup() %>% 
   filter(ts_len >= 30) %>%
   print(n = Inf) %>% 
   pull(country) # n = 212 countries (incl. "other nei")
 
-# Select only capture fisheries data from the countries indentified above, and 
+# Select only capture fisheries data from the countries indentified above, and trim to >=1980 
 agg_fisheries <- subset(agg_production, 
                         sector == "capture" 
-                        & country %in% countries
                         & year >= 1980)
 ```
 
@@ -210,6 +163,7 @@ agg_fisheries <- subset(agg_production,
 ```{r n shocks across Cook's D}
 shock_tally <- c() #vector carrying tally of residuals over specified Cook's D
 sumofshocksacrossD <- c() #sum of shocks vector per cooks distance value
+D <- seq(0.05,1, by=0.05) # Cook's distance vector
 
 for(d in D) {
   shock_tally <- c()
@@ -255,15 +209,213 @@ ggline(n_shocks, x = "D", y = "n_shocks",
 ggsave(here("output", "n_shocks_over_D.pdf"), width = 8, height = 6)
 ```
 
-## Plot shocks
+## Identify shocks
 
-Create a 3 panel plot per country depicting:  
+For each shock in a time series, identify the:
+
+- Country
+- Year
+- Magnitude 
+- Cook's D
+- Recovery time 
+
+```{r}
+shocks <- c()
+for (i in 1:length(unique(agg_fisheries$country))){
+
+  # Aggregated production plot with model fit
+  values <- subset(agg_fisheries$sum_quantity, agg_fisheries$country==unique(agg_fisheries$country)[i])
+  years <- subset(agg_fisheries$year, agg_fisheries$country==unique(agg_fisheries$country)[i])
+
+  fit <- loess(values ~ years, span = 0.6)
+
+  # Regress residuals against lag-1 residuals
+  errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[1:fit$n-1])
+  
+  # Identify the Shock
+  shockInd <- which(as.vector(cooks.distance(errors)>0.3))
+  shockInd <- shockInd[shockInd > 6]
+
+  if (length(shockInd)>0){
+    for (k in 1:length(shockInd)){
+      country <- unique(agg_fisheries$country)[i]
+      country_name <- unique(agg_fisheries$country_name)[i]
+      year <- years[shockInd+1][k]
+      seven_yr_median <- median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
+      abs_magnitude <- seven_yr_median - values[shockInd+1][k]
+      prop_magnitude <- 1-((values[shockInd+1][k])/seven_yr_median)
+      recovery <- which(values[(shockInd+2)[k]:fit$n] >= (seven_yr_median*0.95))[1]
+      data <- cbind.data.frame(country, country_name, year, prop_magnitude, abs_magnitude, recovery)
+      shocks <- rbind(shocks, data)
+      }
+    }
+  }
+summary(shocks)
+
+```
+
+
+
+In the below section I try and rewrite the original code in a tidier manner...not done as of 12/2 but moving on for now
+
+Define functions:
+
+1. `detect_shocks()` - Fit loess model to time series, regress lag-1 residuals, calculate Cook's distance values, and append loess model and Cook's distance values to original time series
+2. `describe_shocks()` - 
+```{r}
+detect_shocks <- function(df, cooks_d_threshold, n_baseline_yrs) {
+  # Alias variables
+  quant <- df$sum_quantity
+  yr <- df$year
+  # Fit loess model
+  fit <- loess(quant ~ yr, span = 0.6)
+  # Regress lag-1 residuals
+  errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[1:fit$n-1])
+  # Determine Cook's distance
+  cooks_d <- as.numeric(c(NA, cooks.distance(errors))) # Add an NA at the beginning so the vector is the same length as the df
+  # Append results
+  df <- broom::augment_columns(fit, data = df) # Augment the df with data from the loess fit
+  df <- dplyr::mutate(df, cooks_d = cooks_d) # Add cook's D values to df
+  # Find indices where Cook's distance passes threshold
+  shock_ind <- which(cooks_d > cooks_d_threshold)
+  # Select only those indices greater than the baseline length
+  shock_ind <- shock_ind[shock_ind > (n_baseline_yrs - 1)]
+  for(k in seq_along(shock_ind)) {
+    country_name <- unique(df$country_name)
+    shock_year <- yr[shock_ind + 1][k]
+    median_baseline <- median(quant[(shock_ind[k] - 6):(shock_ind[k])])
+    abs_magnitude <- median_baseline - quant[shock_ind + 1][k]
+    prop_magnitude <- 1 - ((quant[shock_ind + 1][k])/median_baseline)
+    recovery_time <- which(quant[(shock_ind + 2)[k]:fit$n] >= (median_baseline * 0.95))[1]
+    data <- data.frame(country_name, shock_year, median_baseline, abs_magnitude, prop_magnitude, recovery_time)
+    test <- rbind(test, data)
+  }
+}
+
+#REWRITE TRIAL STARTS HERE
+agg_fisheries_list <- agg_fisheries %>% 
+  group_split(country_name)
+
+df <- agg_fisheries_list[[49]] # Comoros
+
+cooks_d_threshold <- 0.3
+n_baseline_yrs <- 7
+
+# Fit loess model
+fit <- loess(df$sum_quantity ~ df$year, span = 0.6)
+
+# Regress lag-1 residuals
+errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[1:fit$n-1])
+
+# Append columns to data frame:
+# 1. Add loess model outputs
+# 2. Add Cook's Distance data and dd an NA at the beginning so the vector is the same length as the df
+# 3. Identify and name rows where Cook's distance passes the chosen threshold as shocks
+# 4. For all shocks, calculate the median quantity of the prior n years (i.e. "baseline")
+# 5. For all shocks, calculate the absolute change in quantity relative to the baseline
+# 6. For all shocks, calculate the relative change in quantity relative to the baseline 
+# 7. For all shocks, calculate the shock recovery time 
+
+df_final <- df %>% 
+  broom::augment_columns(x = fit) %>% 
+  dplyr::mutate(
+    cooks_d = c(NA_real_, cooks.distance(errors)),
+    is_shock = cooks_d > cooks_d_threshold,
+    #shock_year = dplyr::if_else(is_shock == TRUE, year + 1, NA_real_),
+    median_baseline = dplyr::if_else(is_shock == TRUE, 
+                              zoo::rollapplyr(sum_quantity, width = list(-seq(1:n_baseline_yrs)), median, fill = NA), 
+                              NA_real_)) %>% 
+  dplyr::mutate(
+    abs_change = dplyr::if_else(is_shock == TRUE, median_baseline - sum_quantity, NA_real_),
+    prop_change = dplyr::if_else(is_shock == TRUE, 1 - (sum_quantity/median_baseline), NA_real_))
+    #recovery_time = dplyr::if_else(is_shock == TRUE, 
+                                   #zoo::rollapply(width = list(seq(1:length(year))), functionhere, align = "left", fill = NA)[1], 
+                                   #NA_real_))
+View(df_final)
+                    
+
+
+# Select only those indices greater than the baseline length
+shock_ind <- shock_ind[shock_ind > (n_baseline_yrs - 1)]
+
+for(k in seq_along(shock_ind)) {
+  country_name <- unique(df$country_name)
+  shock_year <- yr[shock_ind + 1][k]
+  median_baseline <- median(quant[(shock_ind[k] - 6):(shock_ind[k])])
+  abs_magnitude <- median_baseline - quant[shock_ind + 1][k]
+  prop_magnitude <- 1 - ((quant[shock_ind + 1][k])/median_baseline)
+  recovery_time <- which(quant[(shock_ind + 2)[k]:fit$n] >= (median_baseline * 0.95))[1]
+  data <- data.frame(country_name, shock_year, median_baseline, abs_magnitude, prop_magnitude, recovery_time)
+  test <- rbind(test, data)
+}
+ 
+agg_fisheries_list <- agg_fisheries %>% 
+  group_split(country_name) %>%
+  #map(detect_shocks)
+  map(~ detect_shocks(., cooks_d_threshold = 0.3, n_baseline_yrs = 7))
+
+D <- seq(0.05,1, by=0.05) # Cook's distance vector
+n_shocks_over_D <- agg_fisheries_list %>% 
+  plyr::rbind.fill(.) %>% 
+  drop_na(cooks_d) %>% # Removes first year of the time series
+  
+  
+  
+  summarise(test = sum(cooks_d > 0.05),
+            test2 = sum(cooks_d > 0.10),
+            test3 = sum(cooks_d > 0.15),
+            test4 = sum(cooks_d > 0.20),
+            test5 = sum(cooks_d > 0.25),
+            test6 = sum(cooks_d > 0.30),
+            test6 = sum(cooks_d > 0.35),
+            test6 = sum(cooks_d > 0.40),
+            test6 = sum(cooks_d > 0.45),
+            test6 = sum(cooks_d > 0.50),
+            test6 = sum(cooks_d > 0.55),
+            test6 = sum(cooks_d > 0.60),
+            test6 = sum(cooks_d > 0.65),
+            test7 = sum(cooks_d > 0.95)) %>% 
+print()
+            
+
+
+describe_shocks <- function(df, cooks_d_threshold) {
+
+  #shockInd <- which(as.vector(cooks.distance(errors)>0.3))
+  #shockInd <- shockInd[shockInd > 6]
+
+  #if (length(shockInd)>0){
+    for (k in 1:length(shockInd)){
+      sector <- "Fisheries"
+      country <- unique(agg_fisheries$country_name)[i]
+      year <- years[shockInd+1][k]
+      seven_yr_median <- median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
+      abs_magnitude <- seven_yr_median - values[shockInd+1][k]
+      prop_magnitude <- 1-((values[shockInd+1][k])/seven_yr_median)
+      recovery_time <- which(values[(shockInd+2)[k]:fit$n] >= (seven_yr_median*0.95))[1]
+      data <- cbind.data.frame(sector, country, year, prop_magnitude, abs_magnitude, recovery_time)
+      shocks <- rbind(shocks, data)
+    }
+  }
+#} 
+
+```
+
+Filter to negative shocks only.
+```{r}
+negative_shocks <- shocks %>% 
+  filter(prop_magnitude < 0)
+```
+
+## Plot shock detection steps
+
+Create a 3 panel plot per country depicting:
+
 - Total annual capture production with a loess model fit
 - Model residuals regressed with lag-1 residuals
 - Cook's D values across the time series
 
 ```{r}
-shocks <- c()
 pdf(file = here("output", "cooks_distance_timeseries.pdf"))
 for (i in 1:length(unique(agg_fisheries$country))){
   op <- par(mfrow=c(3, 1))
@@ -284,82 +436,151 @@ for (i in 1:length(unique(agg_fisheries$country))){
   plot(cooks.distance(errors), type = "o", pch = 20, ylab = "Cook's Distance", xlab = "Index", 
        panel.first = abline(h = 0.3, lty = 2, col = "red", lwd = 2))
   par(op)
-  
-  # Identify the Shock
-  shockInd <- which(as.vector(cooks.distance(errors)>0.3))
-  shockInd <- shockInd[shockInd > 6]
 
-  if (length(shockInd)>0){
-    for (k in 1:length(shockInd)){
-      sector <- "Fisheries"
-      country <- unique(agg_fisheries$country_name)[i]
-      year <- years[shockInd+1][k]
-      seven_yr_median <- median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
-      abs_magnitude <- seven_yr_median - values[shockInd+1][k]
-      prop_magnitude <- 1-((values[shockInd+1][k])/seven_yr_median)
-      recovery <- which(values[(shockInd+2)[k]:fit$n] >= (seven_yr_median*0.95))[1]
-      data <- cbind.data.frame(sector, country, year, prop_magnitude, abs_magnitude, recovery)
-      shocks <- rbind(shocks, data)
-      }
-    }
   }
 dev.off()
-summary(shocks)
 ```
 
+# Explore shocks by group
 
+Explore **negative** shocks across:
 
+- Developed, developing, and underdeveloped countries
+- Countries with and without aquaculture
+- Fished taxa: finfish, molluscs, other inverts
+- Countries with varying levels of fisheries diversification (inverse Simpson's diversification index)
 
+## Socioeconomic development
 
+**How does the number of shocks change across ecoclass group: developed, developing, or least developed countries?**
+```{r}
+# Classify each country as an ecoclass group and calculate the number of shocks experienced
+shocks_vs_ecoclass <- negative_shocks %>% 
+  filter(prop_magnitude < 0) %>% 
+  left_join(country_key[,c("UN_Code", "EcoClass_Group")], by = c("country" = "UN_Code")) %>%
+  rename_all(tolower) %>% 
+  mutate(ecoclass_group = factor(ecoclass_group, levels = c("Developed countries or areas",
+                                                            "Other developing countries or areas",
+                                                            "Least Developed Countries"))) %>% 
+  group_by(country, country_name, ecoclass_group) %>% 
+  summarize(n_shocks = n(),
+            n_unrecovered = sum(is.na(recovery))) %>% 
+  ungroup() %>% 
+  print(n=Inf) 
 
+# What are the sum of shocks experienced by ecoclass group?
+shocks_vs_ecoclass %>% 
+  group_by(ecoclass_group) %>%
+  summarize(total_shocks = sum(n_shocks),
+            total_countries = n_distinct(country),
+            mean_shocks_per_country = mean(n_shocks),
+            sd_shocks_per_country = sd(n_shocks)) %>%
+  ungroup() %>%
+  print()
+```
 
+Plot.
+```{r}
+# Plot
+pdf(file = here("output", "shocks_vs_ecoclass.pdf"), width = 10)
+ggplot(data = shocks_vs_ecoclass, aes(x = ecoclass_group, y = n_shocks)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), geom="errorbar", color="red", width=0.2) +
+  stat_summary(fun.y=mean, geom="point", color="red", size = 3) +
+  theme_pubr() +
+  labs(y = "Number of shocks",
+       x = NULL,
+       title = "Number of negative shocks vs. Ecoclass")
+dev.off()
+```
+ 
+## Fisheries diversification 
 
+**How does the number of shocks change across countries with a range of fisheries diversification levels?** 
 
 ```{r}
-agg_aquaculture <- subset(agg_production, sector == "aquaculture" & country %in% countries)
-pdf(file = here("output", "cooks_distance_timeseries.pdf"))
-for (i in 1:length(unique(agg_aquaculture$country))){
-  op <- par(mfrow=c(3, 1))
-  
-  #Production plot with model fit
-  values <- subset(agg_aquaculture$sum_quantity, agg_aquaculture$country==unique(agg_aquaculture$country)[i])
-  years<-subset(agg_aquaculture$year, agg_aquaculture$country==unique(agg_aquaculture$country)[i])
-  plot(years, values, xlab="Year", ylab="Total Production (tonnes)", main=unique(agg_aquaculture$country_name)[i], pch=20, cex=0.75)
-  fit <- loess(values ~ years, span=0.6)
-  lines(years, predict(fit))
-  
-  #regress residuals against lag-1 residuals
-  errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[2:fit$n])
-  plot(resid(fit)[2:fit$n], resid(fit)[2:fit$n], pch=20, xlab=expression("Residuals"[(italic ("t"))]), ylab=expression("Residuals"[(italic("t-1"))]))
-  abline(errors)
-  
-  #plot cooks distance and identify outliers in residual regression
-  plot(cooks.distance(errors), type="o", pch=20, ylab="Cook's Distance", xlab="Index")
-  abline(h=0.3, lty=2, col="red", lwd=2)
-  par(op)
-  
-  #Identify the Shock
-  shockInd<-which(as.vector(cooks.distance(errors)>0.3))
-  shockInd<-shockInd[shockInd>6]
+# Determine number of species fished per country
+wide <- production %>%
+  filter(sector == "capture") %>% 
+  group_by(country, country_name, year, species) %>% 
+  summarize(count = n()) %>% 
+  mutate(count = as.numeric(count)) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = species, values_from = count) %>% 
+  group_split(country) %>% 
+  map(~diversity(.[,c(-1,-2)], index = "invsimpson")) #could be a way to do this 
   
 
-  if (length(shockInd)>0){
-    for (k in 1:length(shockInd)){
-      Sector <- "aquaculture"
-      Country <- unique(agg_aquaculture$country_name)[i]
-      Year <- years[shockInd+1][k]
-      fiveyearmean<-median(c(values[shockInd][k],values[shockInd-1][k], values[shockInd-2][k], values[shockInd-3][k], values[shockInd-4][k], values[shockInd-5][k],values[shockInd-6][k]))#, values[shockInd-7][k], values[shockInd-8][k]))
-      AbsMagnitude <- fiveyearmean-values[shockInd+1][k]
-      PropMagnitude <- 1-((values[shockInd+1][k])/fiveyearmean)
-      Recovery<-which(values[(shockInd+2)[k]:53]>=(fiveyearmean*0.95))[1]
-      data <- cbind.data.frame(Sector, Country, Year, PropMagnitude, AbsMagnitude, Recovery)
-      shocks <- rbind(shocks, data)
-      }
-    }
-  }
+n_spp_fished <- production %>%
+  filter(sector == "capture") %>% 
+  group_by(country, country_name) %>% 
+  summarize(n_spp_fished = length(unique(species))) %>% 
+  ungroup() %>% 
+  print()
+
+# Determine number of shocks per country
+shocks_vs_n_spp_fished <- shocks %>% 
+  group_by(country, country_name) %>% 
+  summarize(n_shocks = n()) %>% 
+  ungroup() %>% 
+  left_join(n_spp_fished)
+
+shocks_vs_n_spp_fished.1 <- shocks.1 %>% 
+  group_by(country, country_name) %>% 
+  summarize(n_shocks = n()) %>% 
+  ungroup() %>% 
+  left_join(n_spp_fished)
+```
+
+```{r}
+# Plot
+
+# D > 0.3
+pdf(file = here("output", "shocks_vs_n_spp.pdf"), width = 10)
+ggplot(data = shocks_vs_n_spp_fished, aes(x = as.factor(n_shocks), y = n_spp_fished)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), geom="errorbar", color="red", width=0.2) +
+  stat_summary(fun.y=mean, geom="point", color="red", size = 3) +
+  coord_flip() +
+  theme_pubr() +
+  labs(x = "Number of shocks", 
+       y = "Number of fished species",
+       title = "Number of shocks vs. Number of fished species")
 dev.off()
-summary(shocks)
+# D > 0.1
+ggplot(data = shocks_vs_n_spp_fished.1, aes(x = as.factor(n_shocks), y = n_spp_fished)) +
+  geom_boxplot(color = "snow4") +
+  geom_jitter(width = 0.1, height = 0.1) +
+  coord_flip() +
+  theme_pubr() +
+  labs(x = "Number of shocks", y = "Number of fished species")
+```
 
+## Countries with or without aquaculture
+
+```{r}
+
+
+  
+shocks_vs_aq <- shocks %>% 
+  mutate(has_aq = if_else(country %in% countries_w_aq, TRUE, FALSE)) 
+
+shocks_vs_aq %>% 
+  group_by(has_aq) %>% 
+  summarize(total_shocks = n()) %>% 
+  print()
+```
+
+```{r}
+pdf(file = here("output", "shocks_vs_aqua_production.pdf"), width = 10)
+ggplot(data = shocks_vs_aq, aes(x = year, y = has_aq)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  theme_pubr() +
+  labs(x = "Year",
+       y = "Aquaculture Producer?",
+       title = "Shocks vs. Aquaculture producers and non-producers",
+       subtitle = "Aquaculture producers (n=65): 101 shocks\nNon-aquaculture producers (n=66): 121 shocks")
+dev.off()
 ```
 
 # References
