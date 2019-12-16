@@ -1,5 +1,8 @@
 ## A function to detect shocks in a time series and append the results to the original data frame
 ##
+## Input: A data frame containing a time series with a variable of interest
+## Output: New columns appended to input data frame
+##
 ## Danielle Ferraro 
 ## UC Santa Barbara
 ## 2019
@@ -21,13 +24,13 @@ detect_shocks <- function(df, cooks_d_threshold, n_baseline_yrs) {
   # 6. For all shocks, calculate the relative change in quantity relative to the baseline 
   # 7. For all shocks, calculate the shock recovery time 
   
-  df <- df %>% 
+  df %>% 
     broom::augment_columns(x = fit) %>% 
     dplyr::mutate(
       cooks_d = c(NA_real_, cooks.distance(errors)),
       is_shock = cooks_d > cooks_d_threshold,
       median_baseline = dplyr::if_else(is_shock == TRUE, 
-                                       zoo::rollapplyr(sum_quantity, width = list(-seq(1:n_baseline_yrs)), median, fill = NA), 
+                                       zoo::rollapplyr(sum_quantity, width = list(-seq(1:n_baseline_yrs)), median, fill = NA_real_), 
                                        NA_real_)) %>% 
     dplyr::mutate(
       abs_change = dplyr::if_else(is_shock == TRUE, median_baseline - sum_quantity, NA_real_),
