@@ -1,5 +1,5 @@
 ---
-title: "Detecting shocks to global fish production"
+title: "Detecting shocks to global seafood production"
 author: "Danielle Ferraro, UC Santa Barbara"
 date: "`r Sys.Date()`"
 output: 
@@ -12,7 +12,7 @@ link_citations: true
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, eval = FALSE)
 ```
 
 # Introduction
@@ -28,7 +28,7 @@ Below is a first cut at rewriting the code. The original code was written to det
 # Setup
 
 Install packages.
-```{r packages, include = FALSE, eval = FALSE}
+```{r packages, include = FALSE, eval = TRUE}
 library(here)
 library(tidyverse)
 library(ggpubr) # for gg*() plots; theme_pubr(); gridding multiple plots with ggarrange()
@@ -36,7 +36,7 @@ library(broom)
 ```
 
 Source scripts. 
-```{r scripts}
+```{r scripts, eval = TRUE}
 walk(list.files(here("src"), pattern = "\\.R$", full.names = TRUE), source) # Sets file directories
 ```
 
@@ -44,7 +44,8 @@ walk(list.files(here("src"), pattern = "\\.R$", full.names = TRUE), source) # Se
 
 ```{r import data}
 country_key <- read_csv(file.path(dir_raw_data, "FAO", "production", "CL_FI_COUNTRY_GROUPS.csv")) 
-production <- read_csv(file.path(dir_raw_data, "FAO", "production", "TS_FI_PRODUCTION.csv"), col_types = cols(UNIT = col_character())) %>% 
+production <- read_csv(file.path(dir_raw_data, "FAO", "production", "TS_FI_PRODUCTION.csv"), 
+                       col_types = cols(UNIT = col_character())) %>% 
   rename_all(tolower)
 master_spp_key <- read_csv(file.path(dir_data, "master_species_key.csv"))
 ```
@@ -59,7 +60,7 @@ production <- production %>%
   rename(country_name = Name_En)
 ```
 
-Evaluate symbols. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_SYMBOL.csv")`, the different characters in the `SYMBOL` column correspond to the following notes:
+Evaluate symbols. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_SYMBOL.csv")`), the different characters in the `SYMBOL` column correspond to the following notes:
 
 Code|Symbol|Name|Description
 -----|-----|-----|-----
@@ -78,7 +79,7 @@ production <- production %>%
                               TRUE ~ quantity))
 ```
 
-Identify aquaculture vs. capture landings. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_PRODUCTION_SOURCE.csv")`, the different numbers in the `SOURCE` column correspond to the following types of production:
+Identify aquaculture vs. capture landings. According to the FAO metadata (also available on NCEAS' Aurora server at `r file.path(dir_raw_data, "FAO", "production", "CL_FI_PRODUCTION_SOURCE.csv")`), the different numbers in the `SOURCE` column correspond to the following types of production:
 
 Identifier|Code|Name
 -----|-----|-----
@@ -135,6 +136,48 @@ ggpubr::ggarrange(plotlist = agg_production_plots, nrow = 3, ncol = 1, align = "
 dev.off()
 ```
 
+# Calculate production aggregated by major taxonomic group
+
+Aggregate production per year, per country, per sector, per major taxon group.
+```{r calc-agg-production-by-group}
+group_production_list <- production %>% 
+  left_join(master_spp_key[,c("alpha_code", "major_group")], by = c("species"="alpha_code")) %>% 
+  group_by(country, country_name, year, sector, major_group) %>% 
+  summarize(sum_quantity = sum(quantity)) %>% 
+  ungroup() %>% 
+  group_split(country_name)
+```
+
+## Plot production by major taxonomic group
+
+Create a pdf with aquaculture and capture production time series by country and major taxonomic group.
+```{r plot-agg-production-by-group, eval = FALSE}
+# Build of list of production time series plots by country
+group_production_plots <- map(group_production_list, 
+                            ~ggplot(., aes(x = year, y = sum_quantity, color = sector)) + 
+                              geom_hline(yintercept = 0, color = "darkgray", linetype = "dashed") +
+                              geom_line() +
+                              geom_point() +
+                              scale_color_manual(values = c("darkred", "darkblue"), 
+                                                 labels = c("Aquaculture", "Capture")) +
+                              scale_x_continuous(breaks=seq(1950, 2017, 10)) +
+                              ylim(0,NA) +
+                              labs(title = paste("Fisheries production in", .$country_name), 
+                                   x = "Year", 
+                                   y = "Quantity (tonnes)",
+                                   color = NULL) +
+                              facet_wrap(~major_group) +
+                              ggpubr::theme_pubr(border = TRUE) +
+                              theme(legend.text = element_text(size=11),
+                                    axis.text = element_text(size=10))
+)
+
+# Write plots to pdf, 3 per page
+pdf(here("output", "fig_group_production_timeseries.pdf"), height = 8.5, width = 11)
+ggpubr::ggarrange(plotlist = group_production_plots, nrow = 1, ncol = 1, align = "v")
+dev.off()
+```
+
 # Sensitivity Analysis - Cook's Distance (D)
 
 ## Identify suitable time series
@@ -160,7 +203,7 @@ agg_fisheries <- subset(agg_production,
 
 ## Count number of shocks across a range of Cook's D values
 
-```{r n shocks across Cook's D}
+```{r n-shocks-across-cooks-D}
 shock_tally <- c() #vector carrying tally of residuals over specified Cook's D
 sumofshocksacrossD <- c() #sum of shocks vector per cooks distance value
 D <- seq(0.05,1, by=0.05) # Cook's distance vector
@@ -261,12 +304,13 @@ Define function`detect_shocks()`: Fit loess model to time series, regress lag-1 
 agg_fisheries_list <- agg_fisheries %>% 
   group_split(country_name)
 
+# Testing out the function
 df <- agg_fisheries_list[[149]] # Comoros
-
+df <- agg_fisheries_list[[26]] # Comoros
 df <- detect_shocks(df, cooks_d_threshold = 0.3, n_baseline_yrs = 7)
 
 test_list <- agg_fisheries_list %>% 
-  map(., ~detect_shocks(., cooks_d_threshold = 0.3, n_baseline_yrs = 7)) # Not working
+  map(., ~detect_shocks(., cooks_d_threshold = 0.3, span = 0.6, n_baseline_yrs = 7))
 
 # in this line define "shocks" as the rows in df (or test_list) with shocks
 ```
@@ -311,13 +355,17 @@ for (i in 1:length(unique(agg_fisheries$country))){
 dev.off()
 ```
 
-# Explore shocks by group
+# Validate shocks
+
+The shock detection method presented above isn't without flaws. Here I will cross-reference the shocks detected 
+
+# Explore shocks by variable
 
 Explore **negative** shocks across:
 
 - Developed, developing, and underdeveloped countries
 - Countries with and without aquaculture
-- Fished taxa: finfish, molluscs, other inverts
+- Major taxonomic group
 - Countries with varying levels of fisheries diversification (inverse Simpson's diversification index)
 
 ## Socioeconomic development
@@ -385,13 +433,14 @@ diversity <- production %>%
   select(country, country_name, year, fishery, prop_quantity) %>% # Need to drop the symbol column, otherwise there will be >1 row per year
   pivot_wider(names_from = fishery, values_from = prop_quantity) %>% 
   mutate_all(~replace_na(., 0)) %>% # Replace NAs with 0s
-  mutate(div = diversity(.[,c(-1:-6)], index = "invsimpson")) %>% 
-  select(country, country_name, year, div)
+  mutate(div = diversity(.[,c(-1:-6)], index = "invsimpson"),
+         log_div = log(div)) %>% 
+  select(country, country_name, year, div, log_div)
 
 # Append data (number of fisheries; inverse Simpson's diversity index)
 agg_fisheries_list <- agg_fisheries_list %>% 
   map(., ~left_join(., n_fisheries[,c("country_name","year","n_fisheries")], by = c("country_name", "year"))) %>% 
-  map(., ~left_join(., diversity[,c("country_name","year","div")], by = c("country_name", "year")))
+  map(., ~left_join(., diversity[,c("country_name","year","div", "log_div")], by = c("country_name", "year")))
 
 
 
@@ -410,41 +459,44 @@ shocks_vs_n_spp_fished <- shocks %>%
   ungroup() %>% 
   left_join(n_spp_fished)
 
-shocks_vs_n_spp_fished.1 <- shocks.1 %>% 
-  group_by(country, country_name) %>% 
-  summarize(n_shocks = n()) %>% 
-  ungroup() %>% 
-  left_join(n_spp_fished)
-
-# Amount of biomass per species, per country, per year, resulting in diversity index
 ```
 
-Plot:
+Plots:
 ```{r}
-# Aggregated catch time series with points colored by number of species
-
-test <- agg_fisheries_list[112:119]
-(shocks_vs_n_spp_ts <- map(test, 
-                           ~ggplot(., aes(x = year, y = sum_quantity, color = div)) + 
+# Aggregated catch time series with points colored by log of diversity index
+diversification_ts <- map(agg_fisheries_list, 
+                           ~ggplot(., aes(x = year, y = sum_quantity, color = log_div)) + 
                              geom_hline(yintercept = 0, color = "darkgray") +
-                             geom_vline(data = subset(., is_shock == TRUE & abs_magnitude < 0), xintercept = subset(., is_shock == TRUE & abs_magnitude < 0)$year, color = "red", linetype = "dashed") +
-                             #geom_vline(data = subset(., is_shock == TRUE & abs_magnitude > 0), xintercept = subset(., is_shock == TRUE & abs_magnitude > 0)$year, color = "darkgreen") +
+                             geom_vline(data = subset(., is_shock == TRUE & abs_magnitude < 0), xintercept = subset(., is_shock == TRUE & abs_magnitude < 0)$year, linetype = "dashed") +
+                              geom_text(data = subset(., is_shock == TRUE & abs_magnitude < 0), aes(x = subset(., is_shock == TRUE & abs_magnitude < 0)$year), label = "shock", angle = 90, vjust = -1, color = "black") +
                              geom_path() +
-                             geom_point(size = 2, pch = 16) +
-                             scale_color_gradient(low = "gold", high = "red", limits = c(1,60)) +
+                             geom_point(size = 2.5) +
+                             scale_color_gradient(low = "blue", high = "red", limits = c(0,4)) +
                              scale_x_continuous(breaks=seq(1980, 2017, 10)) +
                              ylim(0,NA) +
                              labs(title = paste("Fisheries Production in", .$country_name), 
                                   x = "Year", 
                                   y = "Quantity (tonnes)",
-                                  color = "1/D") +
+                                  color = "log(1/D)") +
                              ggpubr::theme_pubr() +
                              theme(legend.text = element_text(size=11))
-))
-pdf(file = here("output", "shocks_vs_n_spp_ts.pdf"), width = 10)
+)
+pdf(file = here("output", "diversification_ts.pdf"), width = 8.5, height = 11)
+ggarrange(plotlist = diversification_ts, ncol = 1, nrow = 3, align = "v")
+dev.off()
 
+agg_fisheries_list %>% 
+  bind_rows() %>% 
+  filter(is_shock == TRUE) %>% 
+  mutate(log_recovery = log(recovery)) %>% 
+  ggscatter(., x = "log_div", y = "recovery")
 
-# D > 0.3
+agg_fisheries_list %>% 
+  bind_rows() %>% 
+  filter(is.na(is_shock)) %>% 
+  gghistogram(., x = "log_div") 
+
+# Number of shocks vs number of spp fished
 pdf(file = here("output", "shocks_vs_n_spp.pdf"), width = 10)
 ggplot(data = shocks_vs_n_spp_fished, aes(x = as.factor(n_shocks), y = n_spp_fished)) +
   geom_jitter(width = 0.1, height = 0.1) +
@@ -458,10 +510,49 @@ ggplot(data = shocks_vs_n_spp_fished, aes(x = as.factor(n_shocks), y = n_spp_fis
 dev.off()
 ```
 
+## Major taxonomic group
+
+Isolate production per year, per country, per major taxonomic group for capture fisheries only. Trim time series to >= 1980. Remove time series with < 5 years of data. 
+```{r calc-aggregate-production-by-group-capture-only}
+# Filter to capture fisheries only; time series of length >= 5 only; time series trimmed to >=1980
+group_production_list <- group_production_list %>% 
+  bind_rows() %>% # Unsplitting
+  filter(sector == "capture" & year >= 1980) %>% 
+  group_split(country_name, major_group) %>% # Resplitting
+  discard(~nrow(.) < 5) %>% 
+  map(., ~detect_shocks(., cooks_d_threshold = 0.3, span = 0.6, n_baseline_yrs = 7))
+
+# Summarize shock rate per country per year per taxon group
+group_shocks <- group_production_list %>% 
+  bind_rows() %>% 
+  group_by(country, country_name, major_group) %>% 
+  summarize(ts_length = last(year) - first(year),
+         n_shocks = length(which(is_shock==TRUE)),
+         shock_rate = n_shocks/ts_length) %>% 
+  ungroup() %>% 
+  mutate(major_group = case_when(major_group == "PLANTAE AQUATICAE" ~ "PLANTAE\nAQUATICAE",
+                                 major_group == "AMPHIBIA, REPTILIA" ~ "AMPHIBIA,\nREPTILIA",
+                                 major_group == "INVERTEBRATA AQUATICA" ~ "INVERTEBRATA\nAQUATICA",
+                                 TRUE ~ major_group))
+```
+
+Plot:
+```{r}
+pdf(file = here("output", "shocks_vs_majorgroup.pdf"), width = 11, height = 8.5)
+ggplot(data = group_shocks, aes(x = fct_reorder(major_group, shock_rate, .fun = max), y = shock_rate)) +
+  geom_text_repel(aes(label = ifelse(shock_rate > 0.15, as.character(country_name),""))) +
+  geom_boxplot(aes(color = major_group, group = major_group)) +
+  labs(x = "Major taxonomic group", y = "Shock rate (shocks/year)", title = "Shock rate vs. Major taxonomic group") +
+  geom_text(stat = "count", aes(label = paste("n =", ..count..)), y = min(group_shocks$shock_rate)-0.015) +
+  theme_pubr() +
+  theme(legend.position = "none")
+dev.off()
+```
+
+
 ## Countries with or without aquaculture
 
 ```{r}
-
 
   
 shocks_vs_aq <- shocks %>% 

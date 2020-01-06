@@ -7,10 +7,10 @@
 ## UC Santa Barbara
 ## 2019
 
-detect_shocks <- function(df, cooks_d_threshold, n_baseline_yrs) {
+detect_shocks <- function(df, cooks_d_threshold, span, n_baseline_yrs) {
   
   # Fit loess model
-  fit <- loess(df$sum_quantity ~ df$year, span = 0.6)
+  fit <- loess(df$sum_quantity ~ df$year, span = span)
   
   # Regress lag-1 residuals
   errors <- lm(resid(fit)[2:fit$n] ~ resid(fit)[1:fit$n-1])
