@@ -33,6 +33,7 @@ library(here)
 library(tidyverse)
 library(ggpubr) # for gg*() plots; theme_pubr(); gridding multiple plots with ggarrange()
 library(broom)
+library(vegan)
 ```
 
 Source scripts. 
@@ -42,7 +43,7 @@ walk(list.files(here("src"), pattern = "\\.R$", full.names = TRUE), source) # Se
 
 # Import data
 
-```{r import data}
+```{r import-production-data}
 country_key <- read_csv(file.path(dir_raw_data, "FAO", "production", "CL_FI_COUNTRY_GROUPS.csv")) 
 production <- read_csv(file.path(dir_raw_data, "FAO", "production", "TS_FI_PRODUCTION.csv"), 
                        col_types = cols(UNIT = col_character())) %>% 
@@ -54,7 +55,7 @@ master_spp_key <- read_csv(file.path(dir_data, "master_species_key.csv"))
 
 Append country names to production data. 
 
-```{r append country names}
+```{r append-country-names}
 production <- production %>% 
   left_join(country_key[,c("UN_Code", "Name_En")], by = c("country" = "UN_Code")) %>% 
   rename(country_name = Name_En)
@@ -355,11 +356,64 @@ for (i in 1:length(unique(agg_fisheries$country))){
 dev.off()
 ```
 
-# Validate shocks
+# Validate and filter shocks
 
-The shock detection method presented above isn't without flaws. Here I will cross-reference the shocks detected 
+The shock detection method above likely results in a number of false positives (from reporting discrepancies, stochasticity, etc). There are also shocks caused by sociopolitical events, such as wars, that we don't want to include in our analysis. To filter out false positives and war-driven shocks, as well as add in known shock events that may have been missed, I cross-reference the shocks detected with events from three other data sources:
+
+1. Known shocks from Gephart et al. [-@gephart_shocks_2017] and Cottrell et al. [-@cottrell_food_2019]
+2. Extreme event database from Belhabib et al. [-@belhabib_impacts_2018]
+3. Population collapses recorded in the RAM Legacy Stock Assessment Database [@ricard_examining_2012]
+
+## Known shocks to fish production
+
+## Extreme events
+
+Import list of extreme events from Belhabib et al. [-@belhabib_impacts_2018], converted from paper SI word doc. 
+```{r}
+extreme_events <- read_csv(file.path(dir_raw_data, "shocks", "belhabib_etal_2018_extreme_events.csv")) %>% 
+  janitor::clean_names()
+```
+
+
+## Collapses
+
+Import B/B~msy~ time series from the RAM database, selecting the `TBdivTBmsy` variable (relative to total biomass), or `SSBdivSSBmsy` variable (relative to spawning stock biomass) if the former is absent. Following the methods of much published literature, including Pinksy et al. [-@pinsky_fishing_2015], I will define a collapse as a year where B < 20% of B~msy~.
+
+```{r identify-collapses}
+timeseries_values_views <- load_ramlegacy(tables = "timeseries_values_views")[[1]]
+ram_metadata <- load_ramlegacy(tables = "metadata")[[1]]
+
+collapses <- timeseries_values_views  %>% 
+  select(stockid, stocklong, year, TBdivTBmsy, SSBdivSSBmsy) %>% 
+  filter(year >= 1980) %>%  # Trim time series to 1980 onwards
+  mutate(ram_bdivbmsy = ifelse(!is.na(TBdivTBmsy), TBdivTBmsy, SSBdivSSBmsy)) %>% 
+  filter(ram_bdivbmsy < 0.20) %>% # Selecting collapses only
+  group_by(stockid, stocklong, tmp = c(0, cumsum(diff(year) != 1))) %>% 
+  summarize(collapse_first_year = min(year),
+            collapse_last_year = max(year),
+            collapse_duration = n()) %>% 
+  select(-tmp) %>% 
+  left_join(ram_metadata, by = c("stockid", "stocklong")) %>% 
+  left_join(master_spp_key[,c("scientific_name", "major_group", "isscaap_group", "isscaap", "archetype")], by = c("scientificname" = "scientific_name")) %>% 
+  ungroup()
+
+# There are 3 entries that had no match in master_spp_key, so I'll fill those in manually
+collapses <- collapses %>% 
+  mutate(major_group = if_else(is.na(major_group), "PISCES", major_group))
+```
+
+Summary plots for collapses:
+```{r}
+ggplot(collapses, aes(x = fct_infreq(major_group))) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = paste("n =", ..count..)), y = -0.015) +
+  labs(title = "Number of stock collapses per major taxonomic group", x = "Major group", y = "Count") + 
+  theme_pubr()
+```
 
 # Explore shocks by variable
+
+**Maybe split this into a new .Rmd**
 
 Explore **negative** shocks across:
 
@@ -433,39 +487,20 @@ diversity <- production %>%
   select(country, country_name, year, fishery, prop_quantity) %>% # Need to drop the symbol column, otherwise there will be >1 row per year
   pivot_wider(names_from = fishery, values_from = prop_quantity) %>% 
   mutate_all(~replace_na(., 0)) %>% # Replace NAs with 0s
-  mutate(div = diversity(.[,c(-1:-6)], index = "invsimpson"),
-         log_div = log(div)) %>% 
-  select(country, country_name, year, div, log_div)
+  mutate(div = diversity(.[,c(-1:-6)], index = "invsimpson")) %>% 
+  select(country, country_name, year, div)
 
 # Append data (number of fisheries; inverse Simpson's diversity index)
 agg_fisheries_list <- agg_fisheries_list %>% 
   map(., ~left_join(., n_fisheries[,c("country_name","year","n_fisheries")], by = c("country_name", "year"))) %>% 
-  map(., ~left_join(., diversity[,c("country_name","year","div", "log_div")], by = c("country_name", "year")))
-
-
-
-
-n_spp_fished <- production %>%
-  filter(sector == "capture") %>% 
-  group_by(country, country_name) %>% 
-  summarize(n_spp_fished = length(unique(species))) %>% 
-  ungroup() %>% 
-  print()
-
-# Determine number of shocks per country
-shocks_vs_n_spp_fished <- shocks %>% 
-  group_by(country, country_name) %>% 
-  summarize(n_shocks = n()) %>% 
-  ungroup() %>% 
-  left_join(n_spp_fished)
-
+  map(., ~left_join(., diversity[,c("country_name","year","div")], by = c("country_name", "year")))
 ```
 
 Plots:
 ```{r}
 # Aggregated catch time series with points colored by log of diversity index
 diversification_ts <- map(agg_fisheries_list, 
-                           ~ggplot(., aes(x = year, y = sum_quantity, color = log_div)) + 
+                           ~ggplot(., aes(x = year, y = sum_quantity, color = log(div))) + 
                              geom_hline(yintercept = 0, color = "darkgray") +
                              geom_vline(data = subset(., is_shock == TRUE & abs_magnitude < 0), xintercept = subset(., is_shock == TRUE & abs_magnitude < 0)$year, linetype = "dashed") +
                               geom_text(data = subset(., is_shock == TRUE & abs_magnitude < 0), aes(x = subset(., is_shock == TRUE & abs_magnitude < 0)$year), label = "shock", angle = 90, vjust = -1, color = "black") +
@@ -483,30 +518,6 @@ diversification_ts <- map(agg_fisheries_list,
 )
 pdf(file = here("output", "diversification_ts.pdf"), width = 8.5, height = 11)
 ggarrange(plotlist = diversification_ts, ncol = 1, nrow = 3, align = "v")
-dev.off()
-
-agg_fisheries_list %>% 
-  bind_rows() %>% 
-  filter(is_shock == TRUE) %>% 
-  mutate(log_recovery = log(recovery)) %>% 
-  ggscatter(., x = "log_div", y = "recovery")
-
-agg_fisheries_list %>% 
-  bind_rows() %>% 
-  filter(is.na(is_shock)) %>% 
-  gghistogram(., x = "log_div") 
-
-# Number of shocks vs number of spp fished
-pdf(file = here("output", "shocks_vs_n_spp.pdf"), width = 10)
-ggplot(data = shocks_vs_n_spp_fished, aes(x = as.factor(n_shocks), y = n_spp_fished)) +
-  geom_jitter(width = 0.1, height = 0.1) +
-  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), geom="errorbar", color="red", width=0.2) +
-  stat_summary(fun.y=mean, geom="point", color="red", size = 3) +
-  coord_flip() +
-  theme_pubr() +
-  labs(x = "Number of shocks", 
-       y = "Number of fished species",
-       title = "Number of shocks vs. Number of fished species")
 dev.off()
 ```
 
@@ -527,7 +538,7 @@ group_shocks <- group_production_list %>%
   bind_rows() %>% 
   group_by(country, country_name, major_group) %>% 
   summarize(ts_length = last(year) - first(year),
-         n_shocks = length(which(is_shock==TRUE)),
+         n_shocks = length(which(is_shock==TRUE & abs_magnitude < 0)),
          shock_rate = n_shocks/ts_length) %>% 
   ungroup() %>% 
   mutate(major_group = case_when(major_group == "PLANTAE AQUATICAE" ~ "PLANTAE\nAQUATICAE",
