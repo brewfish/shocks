@@ -31,9 +31,11 @@ Install packages.
 ```{r packages, include = FALSE, eval = TRUE}
 library(here)
 library(tidyverse)
+library(readxl)
 library(ggpubr) # for gg*() plots; theme_pubr(); gridding multiple plots with ggarrange()
 library(broom)
 library(vegan)
+library(ramlegacy)
 ```
 
 Source scripts. 
@@ -366,6 +368,32 @@ The shock detection method above likely results in a number of false positives (
 
 ## Known shocks to fish production
 
+Gephart detected 48 shocks to fish production (D > 0.35). Cottrell detected 62 shocks (D > 0.30). Here I harmonize the two datasets to find the number of unique shocks across both sources.  
+
+```{r}
+cottrell_shocks <- read_excel(file.path(dir_raw_data, "shocks", "cottrell_etal_2019_shocks.xlsx")) %>% 
+  janitor::clean_names() %>% 
+  filter(sector == "Fisheries") %>% 
+  select(-sector, -reference, -region, -sub_region, -sub_category) %>% 
+  mutate(source = "Cottrell et al., 2019") %>% 
+  separate(recovery_time_years, into = c("recovery_time_y", "recovered")) %>% 
+  mutate(recovery_time_y = as.numeric(recovery_time_y), 
+         recovered = is.na(recovered)) %>% 
+  rename(magnitude_t = shock_size_tonnes)
+
+gephart_shocks <- read_excel(file.path(dir_raw_data, "shocks", "gephart_etal_2017_shocks.xlsx")) %>% 
+  janitor::clean_names() %>% 
+  mutate(source = "Gephart et al., 2017") %>% 
+  mutate(recovered = recovered == "Y") %>% 
+  rename(driver = cause_s,
+         category = cause_category)
+
+known_shocks <- gephart_shocks %>% 
+  bind_rows(cottrell_shocks) %>% 
+  select(source, everything())
+```
+
+
 ## Extreme events
 
 Import list of extreme events from Belhabib et al. [-@belhabib_impacts_2018], converted from paper SI word doc. 
@@ -374,41 +402,78 @@ extreme_events <- read_csv(file.path(dir_raw_data, "shocks", "belhabib_etal_2018
   janitor::clean_names()
 ```
 
-
 ## Collapses
 
-Import B/B~msy~ time series from the RAM database, selecting the `TBdivTBmsy` variable (relative to total biomass), or `SSBdivSSBmsy` variable (relative to spawning stock biomass) if the former is absent. Following the methods of much published literature, including Pinksy et al. [-@pinsky_fishing_2015], I will define a collapse as a year where B < 20% of B~msy~.
+Import B/B~msy~ time series from the RAM database, selecting the `TBdivTBmsy` variable (relative to total biomass), or `SSBdivSSBmsy` variable (relative to spawning stock biomass) if the former is absent. Following the methods in the literature, including Pinksy et al. [-@pinsky_fishing_2015], I will define a collapse as a year where B < 20% of B~msy~.
 
 ```{r identify-collapses}
+# Load data in from RAM
 timeseries_values_views <- load_ramlegacy(tables = "timeseries_values_views")[[1]]
 ram_metadata <- load_ramlegacy(tables = "metadata")[[1]]
+ram_area <- load_ramlegacy(tables = "area")[[1]]
 
-collapses <- timeseries_values_views  %>% 
+# Select B/Bmsy variables and identify collapse years 
+# Filter to *only* time series with B/Bmsy ref points!
+ram_ts <- timeseries_values_views  %>% 
   select(stockid, stocklong, year, TBdivTBmsy, SSBdivSSBmsy) %>% 
   filter(year >= 1980) %>%  # Trim time series to 1980 onwards
-  mutate(ram_bdivbmsy = ifelse(!is.na(TBdivTBmsy), TBdivTBmsy, SSBdivSSBmsy)) %>% 
-  filter(ram_bdivbmsy < 0.20) %>% # Selecting collapses only
-  group_by(stockid, stocklong, tmp = c(0, cumsum(diff(year) != 1))) %>% 
+  mutate(ram_bdivbmsy = if_else(!is.na(TBdivTBmsy), TBdivTBmsy, SSBdivSSBmsy)) %>% 
+  drop_na(ram_bdivbmsy) %>% 
+  mutate(is_collapse = if_else(ram_bdivbmsy < 0.20, TRUE, FALSE)) %>% 
+  left_join(ram_metadata, by = c("stockid", "stocklong"))
+  #left_join(ram_area, by = "areaname", "areaid")
+  #left_join(master_spp_key[,c("scientific_name", "major_group", "isscaap_group", "isscaap", "archetype")], by = c("scientificname" = "scientific_name"))
+
+# Filter and characterize collapses
+collapses <- ram_ts %>% 
+  filter(is_collapse == TRUE) %>% # Selecting collapses only
+  group_by(stockid, stocklong, country, tmp = c(0, cumsum(diff(year) != 1))) %>% 
   summarize(collapse_first_year = min(year),
             collapse_last_year = max(year),
             collapse_duration = n()) %>% 
   select(-tmp) %>% 
-  left_join(ram_metadata, by = c("stockid", "stocklong")) %>% 
-  left_join(master_spp_key[,c("scientific_name", "major_group", "isscaap_group", "isscaap", "archetype")], by = c("scientificname" = "scientific_name")) %>% 
+  #left_join(ram_metadata, by = c("stockid", "stocklong")) %>% 
+  #left_join(ram_area, by = "areaname") %>% 
+  #left_join(master_spp_key[,c("scientific_name", "major_group", "isscaap_group", "isscaap", "archetype")], by = c("scientificname" = "scientific_name")) %>% 
   ungroup()
 
 # There are 3 entries that had no match in master_spp_key, so I'll fill those in manually
 collapses <- collapses %>% 
-  mutate(major_group = if_else(is.na(major_group), "PISCES", major_group))
+  mutate(major_group = if_else(is.na(major_group), "PISCES", major_group),
+         isscaap_group = case_when(stockid == "ACADREDGOMGB" ~ "Miscellaneous demersal fishes",
+                                   stockid %in% c("NZSNAPNZ7","NZSNAPNZ8") ~ "Miscellaneous coastal fishes",
+                                   TRUE ~ isscaap_group),
+         isscaap = case_when(stockid == "ACADREDGOMGB" ~ 34,
+                                   stockid %in% c("NZSNAPNZ7","NZSNAPNZ8") ~ 33,
+                                   TRUE ~ isscaap),
+         archetype = case_when(stockid == "ACADREDGOMGB" ~ "Rockfish",
+                                   stockid %in% c("NZSNAPNZ7","NZSNAPNZ8") ~ "Bream",
+                                   TRUE ~ archetype))
 ```
 
 Summary plots for collapses:
 ```{r}
 ggplot(collapses, aes(x = fct_infreq(major_group))) +
   geom_bar() +
-  geom_text(stat = "count", aes(label = paste("n =", ..count..)), y = -0.015) +
-  labs(title = "Number of stock collapses per major taxonomic group", x = "Major group", y = "Count") + 
+  labs(title = "Number of stock collapses per major taxonomic group", x = NULL, y = "Count") + 
   theme_pubr()
+
+ggplot(collapses, aes(x = fct_infreq(isscaap_group))) +
+  geom_bar() +
+  labs(title = "Number of stock collapses per major taxonomic group", x = NULL, y = "Count") + 
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 70, hjust = 0.9, vjust = 0.93))
+
+ggplot(ram_ts, aes(x = year, y = FisheryType)) +
+  facet_wrap(~country) +
+  geom_line(aes(color = is_collapse)) +
+  labs(x = NULL) +
+  theme_minimal()
+
+ggplot(ram_ts, aes(x = year, y = FisheryType)) +
+  facet_wrap_paginate(~region, nrow = 1, ncol = 1, page = 5) +
+  geom_line(color = is_collapse) +
+  theme_minimal()
 ```
 
 # Explore shocks by variable
